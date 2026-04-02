@@ -15,9 +15,6 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="GameLoop.c">
-      <Filter>소스 파일</Filter>
-    </ClCompile>
     <ClCompile Include="win32_DX.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>

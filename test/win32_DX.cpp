@@ -1,71 +1,305 @@
-/*
- * [강의 노트: DirectX 11 & Win32 GameLoop]
- * 1. WinMain: 프로그램의 입구
- * 2. WndProc: OS가 보낸 우편물(메시지)을 확인하는 곳
- * 3. GameLoop: 쉬지 않고 Update와 Render를 반복하는 엔진의 심장
- * 4. Release: 빌려온 GPU 메모리를 반드시 반납하는 습관 (메모리 누수 방지)
- */
-
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <chrono>
+#include <vector>
+#include <string>
+#include <thread>
 
 #pragma comment(linker, "/entry:WinMainCRTStartup /subsystem:console")
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 
- // --- [전역 객체 관리] ---
- // DirectX 객체들은 GPU 메모리를 직접 사용함. 
- // 사용 후 'Release()'를 호출하지 않으면 프로그램 종료 후에도 메모리가 점유될 수 있음(메모리 누수).
-ID3D11Device* g_pd3dDevice = nullptr;          // 리소스 생성자 (공장)
-ID3D11DeviceContext* g_pImmediateContext = nullptr;   // 그리기 명령 수행 (일꾼)
-IDXGISwapChain* g_pSwapChain = nullptr;          // 화면 전환 (더블 버퍼링)
-ID3D11RenderTargetView* g_pRenderTargetView = nullptr;   // 그림을 그릴 도화지(View)
+// --- [전역 DX11 객체] ---
+ID3D11Device* g_pd3dDevice = nullptr;
+ID3D11DeviceContext* g_pImmediateContext = nullptr;
+IDXGISwapChain* g_pSwapChain = nullptr;
+ID3D11RenderTargetView* g_pRenderTargetView = nullptr;
+ID3D11VertexShader* g_pVertexShader = nullptr;
+ID3D11PixelShader* g_pPixelShader = nullptr;
+ID3D11InputLayout* g_pInputLayout = nullptr;
 
 struct Vertex {
     float x, y, z;
     float r, g, b, a;
 };
 
-// HLSL (High-Level Shading Language) 소스
 const char* shaderSource = R"(
 struct VS_INPUT { float3 pos : POSITION; float4 col : COLOR; };
 struct PS_INPUT { float4 pos : SV_POSITION; float4 col : COLOR; };
 
 PS_INPUT VS(VS_INPUT input) {
     PS_INPUT output;
-    output.pos = float4(input.pos, 1.0f); // 3D 좌표를 4D로 확장
+    output.pos = float4(input.pos, 1.0f);
     output.col = input.col;
     return output;
 }
-
 float4 PS(PS_INPUT input) : SV_Target {
-    return input.col; // 정점에서 계산된 색상을 픽셀에 그대로 적용
+    return input.col;
 }
 )";
 
+// =========================================================
+// [1단계: 컴포넌트 기저 클래스 
+// =========================================================
+class Component
+{
+public:
+    class GameObject* pOwner = nullptr; // 이 기능이 누구의 것인지 저장
+    bool isStarted = false;             // Start()가 실행되었는지 체크
+
+    virtual void Start() = 0;              // 초기화
+    virtual void Input() {}                // 입력 (선택사항)
+    virtual void Update(float dt) = 0;     // 로직 (필수)
+    virtual void Render() {}               // 그리기 (선택사항)
+
+    virtual ~Component() {}
+};
+
+// =========================================================
+// [2단계: 게임 오브젝트 클래스]
+// =========================================================
+class GameObject {
+public:
+    std::string name;
+    float posX = 0.0f;
+    float posY = 0.0f;
+    std::vector<Component*> components;
+
+    GameObject(std::string n) { name = n; }
+
+    ~GameObject() {
+        for (int i = 0; i < (int)components.size(); i++) {
+            delete components[i];
+        }
+    }
+
+    void AddComponent(Component* pComp) {
+        pComp->pOwner = this;
+        pComp->isStarted = false;
+        components.push_back(pComp);
+    }
+};
+
+// =========================================================
+// [3단계: 구체적인 기능 컴포넌트들 구현]
+// =========================================================
+
+// 1. 플레이어 조종 컴포넌트
+class PlayerControl : public Component {
+public:
+    int playerID;
+    float speed;
+    bool moveUp, moveDown, moveLeft, moveRight;
+
+    PlayerControl(int id) : playerID(id) {}
+
+    void Start() override {
+        speed = 1.0f;
+        moveUp = moveDown = moveLeft = moveRight = false;
+        printf("[%s] PlayerControl Start!\n", pOwner->name.c_str());
+    }
+
+    void Input() override {
+        if (playerID == 1) { // Player 1 (방향키)
+            moveLeft = (GetAsyncKeyState(VK_LEFT) & 0x8000);
+            moveRight = (GetAsyncKeyState(VK_RIGHT) & 0x8000);
+            moveUp = (GetAsyncKeyState(VK_UP) & 0x8000);
+            moveDown = (GetAsyncKeyState(VK_DOWN) & 0x8000);
+        }
+        else if (playerID == 2) { // Player 2 (WASD)
+            moveLeft = (GetAsyncKeyState('A') & 0x8000);
+            moveRight = (GetAsyncKeyState('D') & 0x8000);
+            moveUp = (GetAsyncKeyState('W') & 0x8000);
+            moveDown = (GetAsyncKeyState('S') & 0x8000);
+        }
+    }
+
+    void Update(float dt) override {
+        if (moveLeft)  pOwner->posX -= speed * dt;
+        if (moveRight) pOwner->posX += speed * dt;
+        if (moveUp)    pOwner->posY += speed * dt;
+        if (moveDown)  pOwner->posY -= speed * dt;
+    }
+};
+
+// 2. DX11 렌더링(그리기) 컴포넌트
+class Renderer : public Component {
+public:
+    ID3D11Buffer* vertexBuffer = nullptr;
+    float r, g, b;
+
+    Renderer(float r, float g, float b) : r(r), g(g), b(b) {}
+
+    ~Renderer() {
+        if (vertexBuffer) vertexBuffer->Release();
+    }
+
+    void Start() override {
+        // 컴포넌트가 시작될 때 자신만의 버퍼를 동적(DYNAMIC)으로 생성
+        D3D11_BUFFER_DESC bd = {};
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.ByteWidth = sizeof(Vertex) * 3; // 삼각형 1개 (정점 3개)
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        g_pd3dDevice->CreateBuffer(&bd, nullptr, &vertexBuffer);
+
+        printf("[%s] Renderer Start!\n", pOwner->name.c_str());
+    }
+
+    void Update(float dt) override {} // 렌더러는 업데이트 로직이 없음
+
+    void Render() override {
+        float cx = pOwner->posX;
+        float cy = pOwner->posY;
+        float s = 0.15f;
+
+        // 정점 계산 (부모의 위치 참조)
+        Vertex vertices[3] = {
+            { cx, cy + s, 0.5f, r, g, b, 1.0f },
+            { cx + s * 0.866f, cy - s * 0.5f, 0.5f, r, g, b, 1.0f },
+            { cx - s * 0.866f, cy - s * 0.5f, 0.5f, r, g, b, 1.0f }
+        };
+
+        // 버퍼에 덮어쓰기 (Map/Unmap)
+        D3D11_MAPPED_SUBRESOURCE ms;
+        g_pImmediateContext->Map(vertexBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms);
+        memcpy(ms.pData, vertices, sizeof(vertices));
+        g_pImmediateContext->Unmap(vertexBuffer, 0);
+
+        // 파이프라인에 세팅 후 그리기
+        UINT stride = sizeof(Vertex), offset = 0;
+        g_pImmediateContext->IASetInputLayout(g_pInputLayout);
+        g_pImmediateContext->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
+        g_pImmediateContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        g_pImmediateContext->VSSetShader(g_pVertexShader, nullptr, 0);
+        g_pImmediateContext->PSSetShader(g_pPixelShader, nullptr, 0);
+
+        g_pImmediateContext->Draw(3, 0);
+    }
+};
+
+// =========================================================
+// [4단계: 엔진 코어 (GameLoop)]
+// =========================================================
+class GameLoop {
+public:
+    bool isRunning;
+    std::vector<GameObject*> gameWorld;
+    std::chrono::high_resolution_clock::time_point prevTime;
+    float deltaTime;
+
+    void Initialize() {
+        isRunning = true;
+        deltaTime = 0.0f;
+        prevTime = std::chrono::high_resolution_clock::now();
+    }
+
+    void Input() {
+        // [시스템 입력 처리] ESC 종료 및 F 풀스크린 토글
+        if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) isRunning = false;
+
+        static bool isFPressed = false;
+        if (GetAsyncKeyState('F') & 0x8000) {
+            if (!isFPressed) {
+                BOOL isFullScreen = FALSE;
+                g_pSwapChain->GetFullscreenState(&isFullScreen, nullptr);
+                g_pSwapChain->SetFullscreenState(!isFullScreen, nullptr);
+                isFPressed = true;
+            }
+        }
+        else {
+            isFPressed = false;
+        }
+
+        // 각 컴포넌트의 Input 호출
+        for (int i = 0; i < (int)gameWorld.size(); i++) {
+            for (int j = 0; j < (int)gameWorld[i]->components.size(); j++) {
+                gameWorld[i]->components[j]->Input();
+            }
+        }
+    }
+
+    void Update() {
+        // [Start 호출 보장 로직]
+        for (int i = 0; i < (int)gameWorld.size(); i++) {
+            for (int j = 0; j < (int)gameWorld[i]->components.size(); j++) {
+                if (gameWorld[i]->components[j]->isStarted == false) {
+                    gameWorld[i]->components[j]->Start();
+                    gameWorld[i]->components[j]->isStarted = true;
+                }
+            }
+        }
+
+        // [Update 호출]
+        for (int i = 0; i < (int)gameWorld.size(); i++) {
+            for (int j = 0; j < (int)gameWorld[i]->components.size(); j++) {
+                gameWorld[i]->components[j]->Update(deltaTime);
+            }
+        }
+    }
+
+    void Render() {
+        // DX11 화면 초기화
+        float clearColor[] = { 0.1f, 0.2f, 0.3f, 1.0f };
+        g_pImmediateContext->ClearRenderTargetView(g_pRenderTargetView, clearColor);
+
+        // 각 컴포넌트 그리기
+        for (int i = 0; i < (int)gameWorld.size(); i++) {
+            for (int j = 0; j < (int)gameWorld[i]->components.size(); j++) {
+                gameWorld[i]->components[j]->Render();
+            }
+        }
+
+        g_pSwapChain->Present(1, 0); // VSync ON
+    }
+
+    void Run() {
+        MSG msg = { 0 };
+        while (isRunning) {
+            // [Win32 메시지 처리 (PeekMassge)]
+            if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                if (msg.message == WM_QUIT) isRunning = false;
+                TranslateMessage(&msg);
+                DispatchMessage(&msg);
+            }
+            else {
+                std::chrono::high_resolution_clock::time_point currentTime = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<float> elapsed = currentTime - prevTime;
+                deltaTime = elapsed.count();
+                prevTime = currentTime;
+
+                Input();
+                Update();
+                Render();
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+    }
+
+    ~GameLoop() {
+        for (int i = 0; i < (int)gameWorld.size(); i++) {
+            delete gameWorld[i];
+        }
+    }
+};
+
+// =========================================================
+// [시스템 초기화 (WinMain)]
+// =========================================================
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    if (message == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    if (message == WM_DESTROY) {
+        PostQuitMessage(0);
+        return 0;
+    }
     return DefWindowProc(hWnd, message, wParam, lParam);
 }
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    // 1. 윈도우 등록 및 생성
-    WNDCLASSEXW wcex = { sizeof(WNDCLASSEX) };
-    wcex.lpfnWndProc = WndProc;
-    wcex.hInstance = hInstance;
-    wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wcex.lpszClassName = L"DX11GameLoopClass";
-    RegisterClassExW(&wcex);
-
-    HWND hWnd = CreateWindowW(L"DX11GameLoopClass", L"과제: 움직이는 육망성 만들기",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, nullptr, nullptr, hInstance, nullptr);
-    if (!hWnd) return -1;
-    ShowWindow(hWnd, nCmdShow);
-
-    // 2. DX11 디바이스 및 스왑 체인 초기화
-    DXGI_SWAP_CHAIN_DESC sd = {};
+void InitDX11(HWND hWnd) {
+    //DX11 디바이스 및 스왑 체인 초기화
+    DXGI_SWAP_CHAIN_DESC sd = { 0 };
     sd.BufferCount = 1;
     sd.BufferDesc.Width = 800; sd.BufferDesc.Height = 600;
     sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -82,88 +316,75 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ID3D11Texture2D* pBackBuffer = nullptr;
     g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer);
     g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_pRenderTargetView);
-    pBackBuffer->Release(); // 뷰를 생성했으므로 원본 텍스트는 바로 해제 (중요!)
+    pBackBuffer->Release();
+
+    g_pImmediateContext->OMSetRenderTargets(1, &g_pRenderTargetView, nullptr);
+    D3D11_VIEWPORT vp = { 0, 0, 800, 600, 0.0f, 1.0f };
+    g_pImmediateContext->RSSetViewports(1, &vp);
 
     // 3. 셰이더 컴파일 및 생성
     ID3DBlob* vsBlob, * psBlob;
     D3DCompile(shaderSource, strlen(shaderSource), nullptr, nullptr, nullptr, "VS", "vs_4_0", 0, 0, &vsBlob, nullptr);
     D3DCompile(shaderSource, strlen(shaderSource), nullptr, nullptr, nullptr, "PS", "ps_4_0", 0, 0, &psBlob, nullptr);
 
-    ID3D11VertexShader* vShader;
-    ID3D11PixelShader* pShader;
-    g_pd3dDevice->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vShader);
-    g_pd3dDevice->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &pShader);
+    ID3D11VertexShader* vShader = nullptr;
+    ID3D11PixelShader* pShader = nullptr;
+    g_pd3dDevice->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_pVertexShader);
+    g_pd3dDevice->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_pPixelShader);
 
-    // 정점의 데이터 형식을 정의 (IA 단계에 알려줌)
     D3D11_INPUT_ELEMENT_DESC layout[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
         { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
     };
-    ID3D11InputLayout* pInputLayout;
-    g_pd3dDevice->CreateInputLayout(layout, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &pInputLayout);
-    vsBlob->Release(); psBlob->Release(); // 컴파일용 임시 메모리 해제
+    g_pd3dDevice->CreateInputLayout(layout, 2, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &g_pInputLayout);
+    vsBlob->Release(); psBlob->Release();
+}
 
-    // 4. 정점 버퍼 생성 (삼각형 데이터)
-    Vertex vertices[] = {
-        {  0.0f,  0.5f, 0.5f, 1.0f, 0.0f, 0.0f, 1.0f },
-        {  0.5f, -0.5f, 0.5f, 0.0f, 1.0f, 0.0f, 1.0f },
-        { -0.5f, -0.5f, 0.5f, 0.0f, 0.0f, 1.0f, 1.0f },
-    };
-    ID3D11Buffer* pVBuffer;
-    D3D11_BUFFER_DESC bd = { sizeof(vertices), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
-    D3D11_SUBRESOURCE_DATA initData = { vertices, 0, 0 };
-    g_pd3dDevice->CreateBuffer(&bd, &initData, &pVBuffer);
+int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    WNDCLASSEXW wcex = { sizeof(WNDCLASSEX) };
+    wcex.style = CS_HREDRAW | CS_VREDRAW;
+    wcex.lpfnWndProc = WndProc;
+    wcex.hInstance = hInstance;
+    wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wcex.lpszClassName = L"GameEngineClass";
+    RegisterClassExW(&wcex);
 
-    // --- [5. 정석 게임 루프] ---
-    MSG msg = { 0 };
-    while (WM_QUIT != msg.message) {
-        // (1) 입력 단계: PeekMessage는 메시지가 없어도 바로 리턴함 (Non-blocking)
-        if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-        else {
-            // (2) 업데이트 단계: 여기서 캐릭터의 위치나 로직을 계산함
-            // (과제: GetAsyncKeyState 등을 써서 posX, posY를 변경하셈)
+    HWND hWnd = CreateWindowW(L"GameEngineClass", L"컴포넌트 패턴 엔진 (800x600)",
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, nullptr, nullptr, hInstance, nullptr);
 
-            // (3) 출력 단계: 변한 데이터를 바탕으로 화면에 그림
-            float clearColor[] = { 0.1f, 0.2f, 0.3f, 1.0f };
-            g_pImmediateContext->ClearRenderTargetView(g_pRenderTargetView, clearColor);
+    InitDX11(hWnd);
+    ShowWindow(hWnd, nCmdShow);
 
-            // 렌더링 파이프라인 상태 설정
-            g_pImmediateContext->OMSetRenderTargets(1, &g_pRenderTargetView, nullptr);
-            D3D11_VIEWPORT vp = { 0, 0, 800, 600, 0.0f, 1.0f };
-            g_pImmediateContext->RSSetViewports(1, &vp);
+    // --- [게임 루프 및 객체 초기화] ---
+    GameLoop gLoop;
+    gLoop.Initialize();
 
-            g_pImmediateContext->IASetInputLayout(pInputLayout);
-            UINT stride = sizeof(Vertex), offset = 0;
-            g_pImmediateContext->IASetVertexBuffers(0, 1, &pVBuffer, &stride, &offset);
+    // Player 1 (노란색 삼각형, 방향키)
+    GameObject* player1 = new GameObject("Player1");
+    player1->posX = 0.3f;
+    player1->AddComponent(new PlayerControl(1));
+    player1->AddComponent(new Renderer(1.0f, 1.0f, 0.0f));
+    gLoop.gameWorld.push_back(player1);
 
-            // Primitive Topology 설정: 삼각형 리스트로 연결하라!
-            g_pImmediateContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // Player 2 (파란색 삼각형, WASD), 컴포넌트 추가
+    GameObject* player2 = new GameObject("Player2");
+    player2->posX = -0.3f;
+    player2->AddComponent(new PlayerControl(2));
+    player2->AddComponent(new Renderer(0.0f, 0.5f, 1.0f));
+    gLoop.gameWorld.push_back(player2);
 
-            g_pImmediateContext->VSSetShader(vShader, nullptr, 0);
-            g_pImmediateContext->PSSetShader(pShader, nullptr, 0);
+    // 엔진 시작!
+    gLoop.Run();
 
-            // 최종 그리기
-            g_pImmediateContext->Draw(3, 0);
-
-            // 화면 교체 (프론트 버퍼와 백 버퍼 스왑)
-            g_pSwapChain->Present(0, 0);
-        }
-    }
-
-    // --- [6. 자원 해제 (Release)] ---
-    // 생성(Create)한 모든 객체는 프로그램 종료 전 반드시 Release 해야 함.
-    // 생성의 역순으로 해제하는 것이 관례임.
-    if (pVBuffer) pVBuffer->Release();
-    if (pInputLayout) pInputLayout->Release();
-    if (vShader) vShader->Release();
-    if (pShader) pShader->Release();
+    // --- [메모리 해제] ---
+    g_pSwapChain->SetFullscreenState(FALSE, nullptr);
+    if (g_pInputLayout) g_pInputLayout->Release();
+    if (g_pVertexShader) g_pVertexShader->Release();
+    if (g_pPixelShader) g_pPixelShader->Release();
     if (g_pRenderTargetView) g_pRenderTargetView->Release();
     if (g_pSwapChain) g_pSwapChain->Release();
     if (g_pImmediateContext) g_pImmediateContext->Release();
     if (g_pd3dDevice) g_pd3dDevice->Release();
 
-    return (int)msg.wParam;
+    return 0;
 }

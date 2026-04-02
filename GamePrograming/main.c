@@ -148,6 +148,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_KEYDOWN:
+        // 방향키에 따른 실시간 위치 업데이트 (DeltaTime 미사용 고정 수치)
         if (wParam == VK_LEFT)  g_Ctx.posX -= 0.05f;
         if (wParam == VK_RIGHT) g_Ctx.posX += 0.05f;
         if (wParam == VK_UP)    g_Ctx.posY += 0.05f;
