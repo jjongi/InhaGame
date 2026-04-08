@@ -40,9 +40,9 @@ float4 PS(PS_INPUT input) : SV_Target {
 }
 )";
 
-// =========================================================
-// [1단계: 컴포넌트 기저 클래스 
-// =========================================================
+
+// -- [1. 컴포넌트 기저 클래스] ---
+
 class Component
 {
 public:
@@ -57,9 +57,9 @@ public:
     virtual ~Component() {}
 };
 
-// =========================================================
-// [2단계: 게임 오브젝트 클래스]
-// =========================================================
+
+// --- [2. 게임 오브젝트 클래스] ---
+
 class GameObject {
 public:
     std::string name;
@@ -82,11 +82,11 @@ public:
     }
 };
 
-// =========================================================
-// [3단계: 구체적인 기능 컴포넌트들 구현]
-// =========================================================
 
-// 1. 플레이어 조종 컴포넌트
+//  --- [3. 구체적인 기능 컴포넌트] ---
+
+
+// 1. 플레이어 컨트롤 컴포넌트
 class PlayerControl : public Component {
 public:
     int playerID;
@@ -148,7 +148,7 @@ public:
         printf("[%s] Renderer Start!\n", pOwner->name.c_str());
     }
 
-    void Update(float dt) override {} // 렌더러는 업데이트 로직이 없음
+    void Update(float dt) override {} 
 
     void Render() override {
         float cx = pOwner->posX;
@@ -162,7 +162,7 @@ public:
             { cx - s * 0.866f, cy - s * 0.5f, 0.5f, r, g, b, 1.0f }
         };
 
-        // 버퍼에 덮어쓰기 (Map/Unmap)
+        // 버퍼에 덮어쓰기
         D3D11_MAPPED_SUBRESOURCE ms;
         g_pImmediateContext->Map(vertexBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms);
         memcpy(ms.pData, vertices, sizeof(vertices));
@@ -180,9 +180,8 @@ public:
     }
 };
 
-// =========================================================
-// [4단계: 엔진 코어 (GameLoop)]
-// =========================================================
+
+// [4. GameLoop]
 class GameLoop {
 public:
     bool isRunning;
@@ -197,7 +196,7 @@ public:
     }
 
     void Input() {
-        // [시스템 입력 처리] ESC 종료 및 F 풀스크린 토글
+        // [시스템 입력 처리] ESC 종료 및 F 토글
         if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) isRunning = false;
 
         static bool isFPressed = false;
@@ -286,9 +285,9 @@ public:
     }
 };
 
-// =========================================================
+
 // [시스템 초기화 (WinMain)]
-// =========================================================
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     if (message == WM_DESTROY) {
         PostQuitMessage(0);
@@ -308,11 +307,11 @@ void InitDX11(HWND hWnd) {
     sd.SampleDesc.Count = 1;
     sd.Windowed = TRUE;
 
-    // GPU와 통신할 통로(Device)와 화면(SwapChain)을 생성함.
+    
     D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
         D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, nullptr, &g_pImmediateContext);
 
-    // 렌더 타겟 설정 (도화지 준비)
+    // 렌더 타겟 
     ID3D11Texture2D* pBackBuffer = nullptr;
     g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer);
     g_pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_pRenderTargetView);
@@ -373,10 +372,10 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     player2->AddComponent(new Renderer(0.0f, 0.5f, 1.0f));
     gLoop.gameWorld.push_back(player2);
 
-    // 엔진 시작!
+    // 엔진 시작
     gLoop.Run();
 
-    // --- [메모리 해제] ---
+    // --- [5. 자원 해제 (Release)] ---
     g_pSwapChain->SetFullscreenState(FALSE, nullptr);
     if (g_pInputLayout) g_pInputLayout->Release();
     if (g_pVertexShader) g_pVertexShader->Release();

@@ -15,7 +15,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="win32_DX.cpp">
+    <ClCompile Include="Lecture04_HW.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
   </ItemGroup>
